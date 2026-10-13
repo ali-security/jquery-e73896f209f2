@@ -1,3 +1,33 @@
 language: node_js
+dist: focal
 node_js:
 - '0.10'
+jobs:
+  include:
+    - name: "grunt build (node 0.10) + QUnit suite in headless Chrome"
+      node_js: '20'
+      addons:
+        chrome: stable
+      install:
+        - nvm install 0.10
+        - nvm use 0.10
+        - node --version
+        - npm --version
+        - npm install
+      script:
+        - ./node_modules/.bin/grunt
+        - nvm use 20
+        - mkdir -p /tmp/driver
+        - (cd /tmp/driver && npm init -y && npm install puppeteer-core@24)
+        - which google-chrome
+        - google-chrome --version
+        - PHP_CLI_SERVER_WORKERS=10 php -S 127.0.0.1:8000 -t . > /tmp/php-server.log 2>&1 &
+        - sleep 3
+        - >-
+          SEAL_CHROME_BIN="$(which google-chrome)"
+          NODE_PATH=/tmp/driver/node_modules
+          SEAL_SKIP_TESTS="ajax: #14379 - jQuery.ajax() on unload ;;
+          offset: fractions (see #7730 and #7885) ;;
+          css: widows & orphans #8936 ;;
+          Sizzle: selector: pseudo - :lang"
+          node test/seal-browser-runner.js "http://127.0.0.1:8000/test/index.html?dev"

@@ -1,0 +1,108 @@
+name: seal-build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-and-pack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Write build helpers
+        run: |
+          mkdir -p "$RUNNER_TEMP/seal"
+          cat > "$RUNNER_TEMP/seal/make-cdn-copies.js" <<'EOF'
+          // Reproduces makeReleaseCopies() from build/release.js (dist/cdn/*),
+          // without the googlecdn/mscdn zips.
+          var fs = require( "fs" ),
+              pkg = require( process.cwd() + "/package.json" ),
+              cdnFolder = "dist/cdn",
+              devFile = "dist/jquery.js",
+              minFile = "dist/jquery.min.js",
+              mapFile = "dist/jquery.min.map",
+              releaseFiles = {
+                "jquery-VER.js": devFile,
+                "jquery-VER.min.js": minFile,
+                "jquery-VER.min.map": mapFile,
+                "jquery.js": devFile,
+                "jquery.min.js": minFile,
+                "jquery.min.map": mapFile,
+                "jquery-latest.js": devFile,
+                "jquery-latest.min.js": minFile,
+                "jquery-latest.min.map": mapFile
+              };
+          if ( !fs.existsSync( cdnFolder ) ) {
+            fs.mkdirSync( cdnFolder );
+          }
+          Object.keys( releaseFiles ).forEach(function( key ) {
+            var text,
+              builtFile = releaseFiles[ key ],
+              unpathedFile = key.replace( /VER/g, pkg.version ),
+              releaseFile = cdnFolder + "/" + unpathedFile;
+            if ( /\.map$/.test( releaseFile ) ) {
+              text = fs.readFileSync( builtFile, "utf8" )
+                .replace( /"file":"([^"]+)","sources":\["([^"]+)"\]/,
+                  "\"file\":\"" + unpathedFile.replace( /\.min\.map/, ".min.js" ) +
+                  "\",\"sources\":[\"" + unpathedFile.replace( /\.min\.map/, ".js" ) + "\"]" );
+              fs.writeFileSync( releaseFile, text );
+            } else if ( /\.min\.js$/.test( releaseFile ) ) {
+              text = fs.readFileSync( builtFile, "utf8" )
+                .replace( /\/\/# sourceMappingURL=\S+/, "" );
+              fs.writeFileSync( releaseFile, text );
+            } else {
+              fs.writeFileSync( releaseFile, fs.readFileSync( builtFile ) );
+            }
+            console.log( "cdn: " + releaseFile );
+          });
+          EOF
+          cat > "$RUNNER_TEMP/seal/build.sh" <<'EOF'
+          #!/bin/sh
+          set -eu
+          unset COMMIT
+          cd /work
+          node --version
+          npm --version
+          npm config set registry https://time-machines-npm.sealsecurity.io/
+          npm config set //time-machines-npm.sealsecurity.io/:_authToken 2014-01-23T21:07:07.184000Z
+          npm config set always-auth true
+          # Pin the embedded build date (build/ is not part of the version patch).
+          sed -i 's|( new Date() )\.toISOString()\.replace( /:[^/]*/, "Z" )|"2014-01-23T21:02Z"|' build/tasks/build.js
+          if ! grep -q '"2014-01-23T21:02Z"' build/tasks/build.js; then
+            echo "build date pin did not apply" >&2
+            exit 1
+          fi
+          # The uglify banner year is pinned in Gruntfile.js (source edit).
+          if grep -q "grunt.template.today" Gruntfile.js; then
+            echo "Gruntfile.js banner year is not pinned" >&2
+            exit 1
+          fi
+          npm install
+          ./node_modules/.bin/grunt
+          node /seal/make-cdn-copies.js
+          rm -rf node_modules .github
+          chown -R "$HOST_UID:$HOST_GID" /work
+          npm pack
+          mkdir -p /work/seal-out
+          mv jquery-1.11.0.tgz /work/seal-out/jquery-1.11.0.tgz
+          chown -R "$HOST_UID:$HOST_GID" /work/seal-out
+          EOF
+          chmod +x "$RUNNER_TEMP/seal/build.sh"
+
+      - name: Build and pack (node 0.10 / npm 2)
+        run: |
+          docker run --rm \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+            -v "$GITHUB_WORKSPACE":/work \
+            -v "$RUNNER_TEMP/seal":/seal \
+            -w /work \
+            node:0.10-wheezy sh /seal/build.sh
+          ls -l seal-out
+          tar tzf seal-out/jquery-1.11.0.tgz | wc -l
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jquery-tgz
+          path: seal-out/jquery-1.11.0.tgz
+          if-no-files-found: error
